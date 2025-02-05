@@ -7,7 +7,7 @@ blockLength = 500;
 dataBlockCount = 10;
 sampleRate = 200e3;
 toneFreq = 50e3;
-freqError = 1e3;
+freqError = 10e3;
 snrDbRange = -20:2:20;
 seedCount = 1000;
 
@@ -26,6 +26,7 @@ dataSeq = randi([0 1], 1, blockLength*dataBlockCount) * 2 - 1;
 
 % Compose frame
 txSignal = [freqSeq synchSeq dataSeq];
+signalLength = length(txSignal);
 
 %% Run experiment
 syncFailed = zeros(seedCount, length(snrDbRange));
@@ -39,7 +40,7 @@ for snrDbIdx = 1:length(snrDbRange)
         
         %% Propagate through the channel
         % Apply frequency shift due to carrier mismatch
-        rxSignal = txSignal .* exp(1j*2*pi*freqError/sampleRate*(1:length(txSignal)));
+        rxSignal = txSignal .* exp(1j*2*pi*freqError/sampleRate*(1:signalLength));
         
         % Sample AWGN noise from CN(0,1) distribution
         noise = (randn(size(rxSignal)) + 1j * randn(size(rxSignal))) * sqrt(1/2);
@@ -48,14 +49,44 @@ for snrDbIdx = 1:length(snrDbRange)
         rxSignal = rxSignal + noise * db2mag(-snrDb);
         
         %% Synchronization
+        % Phase difference
+        phaseDifference = angle(rxSignal(2:signalLength) .* conj(rxSignal(1:signalLength-1)));
+        windowSize = length(freqSeq);
+        phaseDifferenceMatr = [zeros(1, windowSize), phaseDifference, zeros(1, windowSize)];
+        
+        % Moving average
+        movingAverage = movmean(phaseDifferenceMatr, windowSize);
+        
+        % Peak moving average
+        [~, maxIdx] = max(abs(movingAverage));
+        
+        if ( maxIdx + windowSize/2 > signalLength)
+            syncFailed(seedIdx, snrDbIdx) = 1;
+            continue;
+        end
+        
+        % FFT
+        fftLength = maxIdx - windowSize/2;
+        fftAmplitudeSignal = abs(fft(rxSignal(1:fftLength)));
+        
+        % Peak signal
+        [~, fftAmplitudeSignalMaxIdx] = max(fftAmplitudeSignal);
+        
+
+        fftFrequencies = (0:fftLength-1) * (sampleRate / fftLength);
+        frequencyShift = fftFrequencies(fftAmplitudeSignalMaxIdx) - toneFreq;
+        
+        % Frequency compensation
+        rxSignal = rxSignal .* exp(1j*2*pi*(-frequencyShift)/sampleRate*(1:signalLength));
+        
         % Correlation
         correlation = conv(rxSignal, conj(synchSeq(end:-1:1)));
         
-        % Peak finding
-        [~,maxIdx] = max(abs(correlation));
+        % Peak correlation finding
+        [~,correlationMaxIdx] = max(abs(correlation));
         
         % Finding sync start
-        syncStart = maxIdx - length(synchSeq) + 1;
+        syncStart = correlationMaxIdx - length(synchSeq) + 1;
         
         % Calculate squared timing error compared to reference sync start
         refSyncStart = length(freqSeq) + 1;
